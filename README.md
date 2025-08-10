@@ -1,221 +1,213 @@
-ai_morning_trader
 
-A lightweight, opinionated morning trading bot that scans at the open, places/manage orders with Alpaca, and sends Slack notifications. It’s designed to be simple to operate, safe-by-default with a DRY_RUN toggle, and easy to run on a schedule via GitHub Actions.
-	•	Brokerage: Alpaca (live or paper)
-	•	Signals: Pluggable strategy module (e.g., LightGBM / rules)
-	•	Notifications: Slack Incoming Webhook
-	•	Scheduler: GitHub Actions (AM open, PM close, weekly summary)
-	•	Capital profile: Works with small accounts ($1k–$2k); supports intraday exits
+AI Morning Trader
+
+An automated Alpaca-based trading bot that uses LightGBM machine learning to rank stocks at market open, place bracket orders with take-profit and stop-loss levels, and manage positions through the day using a hybrid close logic that can selectively hold winners overnight.
+
+Built for hands-off daily execution with Slack notifications, P&L tracking, and optional GitHub Actions automation.
 
 ⸻
 
 Features
-	•	Morning open flow: fetch pre-open context and first prints, generate orders, place bracket OCO (TP/SL) when enabled.
-	•	Intraday risk controls: position sizing cap, max concurrent orders, and optional stop/take-profit.
-	•	Slack updates: executions, errors, P/L snapshots, Friday performance recap.
-	•	One-switch safety: DRY_RUN=true simulates everything without placing orders.
-	•	Pluggable strategy: swap out strategy/ (e.g., train_lgbm) without touching the runner.
-	•	Actionable logs: CSV trade log + structured console output for quick audits.
+	•	📈 Machine Learning Ranking — LightGBM model ranks tickers daily based on recent performance, volatility, and trend indicators
+	•	🛑 Bracket Orders — Automatic stop-loss and take-profit protection
+	•	💤 Hybrid Close Logic — Option to hold strong performers overnight
+	•	📊 Performance Logging — Tracks trades, P&L, and daily returns in trade_log.csv
+	•	🔔 Slack Notifications — Real-time updates for trade signals, executions, and end-of-day summaries
+	•	⚙️ Fully Configurable via config.yaml
+	•	🤖 Optional Automation with GitHub Actions — runs at open and close without manual intervention
 
 ⸻
 
-Repository structure
+Workflow Diagram
+
+flowchart TD
+    A[Market Open] --> B[Fetch Historical Prices from Yahoo Finance]
+    B --> C[Compute Features: returns, volatility, SMA ratios]
+    C --> D[Train LightGBM Model]
+    D --> E[Predict Next-Day Returns for Each Ticker]
+    E --> F[Rank by Predicted Return]
+    F --> G[Build Bracket Orders (stop-loss & take-profit)]
+    G --> H[Submit Orders via Alpaca API]
+    H --> I[Log Trades in trade_log.csv]
+    I --> J[Send Slack Morning Notification]
+    J --> K[Market Trading Day]
+    K --> L[Market Close Trigger]
+    L --> M[Fetch Positions & P&L]
+    M --> N[Hybrid Close Logic: Hold or Close]
+    N --> O[Update trade_log.csv with P&L]
+    O --> P[Send Slack Close Summary]
+
+
+⸻
+
+Project Structure
 
 ai_morning_trader/
-├─ README.md
-├─ requirements.txt
-├─ .env.example
-├─ trade_open.py                # Morning run: fetch data → decide → (simulate|submit) orders
-├─ trade_close.py               # Optional PM run: manage/flatten positions, end-of-day tasks
-├─ weekly_summary.py            # Friday recap: performance summary + Slack
-├─ strategy/
-│  ├─ __init__.py
-│  ├─ signals.py                # Signal generation helper(s)
-│  └─ train_lgbm.py             # Example model training / scoring function(s)
-├─ broker/
-│  ├─ __init__.py
-│  ├─ alpaca_client.py          # Thin wrapper around Alpaca Trading API
-│  └─ data.py                   # Market data fetch (e.g., Alpaca/YFinance fallback)
-├─ notifier/
-│  ├─ __init__.py
-│  └─ notify_slack.py           # Slack webhook helper
-├─ config/
-│  ├─ symbols.yaml              # Universe / watchlist
-│  └─ settings.yaml             # Risk, sizing, TP/SL, thresholds
-├─ utils/
-│  ├─ timeutils.py              # Timezones, session windows
-│  ├─ mathutils.py              # Sizing, rounding, safe arithmetic
-│  └─ io.py                     # Logging (CSV), safe file ops
-├─ trade_log.csv                # Appended trade/activity log (auto-created)
-└─ .github/workflows/
-   ├─ morning_open.yml          # 9:30 ET (14:30 UTC) run
-   ├─ afternoon_close.yml       # 15:55 ET (20:55 UTC) run
-   └─ friday_summary.yml        # Fri recap
+│
+├── trade_open.py        # Market open logic — builds orders & submits trades
+├── trade_close.py       # Market close logic — hybrid close or flatten positions
+├── strategy.py          # LightGBM model training & predictions
+├── notifier.py          # Slack notification helper
+├── config.yaml          # Trading configuration
+├── trade_log.csv        # Auto-generated log of trades & P&L
+└── .github/workflows/   # GitHub Actions automation
 
-Your exact filenames may differ; update this tree to match your repo.
 
 ⸻
 
-Quick start
+Setup
 
-1) Install
+1. Clone the repo
 
-python -m venv .venv && source .venv/bin/activate
+git clone https://github.com/YOUR_USERNAME/ai_morning_trader.git
+cd ai_morning_trader
+
+2. Create and activate a virtual environment
+
+python3 -m venv venv
+source venv/bin/activate
+
+3. Install dependencies
+
 pip install -r requirements.txt
 
-2) Configure environment
+4. Set environment variables
 
-Copy the template and fill in secrets:
+For local runs:
 
-cp .env.example .env
+export APCA_API_KEY_ID="your_api_key"
+export APCA_API_SECRET_KEY="your_secret_key"
+export APCA_PAPER="true"        # true = paper trading, false = live trading
+export DRY_RUN="true"           # true = simulate, false = submit real orders
+export SLACK_WEBHOOK_URL="your_slack_webhook"
 
-.env.example (edit as needed):
+For GitHub Actions, set the same variables as Secrets in your repository settings.
 
-# --- Mode ---
-DRY_RUN=true                 # true = simulate; false = place real orders
+⸻
 
-# --- Alpaca ---
-ALPACA_KEY_ID=your_key_id
-ALPACA_SECRET_KEY=your_secret
-ALPACA_PAPER=true           # true = paper API; false = live API
+Configuration (config.yaml)
 
-# --- Slack ---
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
+Example:
 
-# --- Behavior / Risk ---
-MAX_POSITION_DOLLARS=500
-MAX_CONCURRENT_POSITIONS=3
-DEFAULT_TAKE_PROFIT_PCT=0.05
-DEFAULT_STOP_LOSS_PCT=0.03
+tickers: ["AAPL", "MSFT", "NVDA", "GOOG", "AMZN"]
+top_n: 3
+per_trade_budget: 500
+stop_atr_mult: 1.5
+take_atr_mult: 3.0
+atr_lookback: 14
+dry_run: true
 
-3) Configure strategy & symbols
-	•	Edit config/symbols.yaml for your universe (e.g., ["HOOG"]).
-	•	Adjust thresholds and risk in config/settings.yaml.
-	•	Make sure your strategy functions return actionable signals (e.g., BUY/SELL, target qty, TP/SL).
-
-4) Run locally
-
-Morning open (simulated by default):
-
-python trade_open.py
-
-PM close (optional, rebalance/flatten):
-
-python trade_close.py
-
-Weekly recap:
-
-python weekly_summary.py
-
-Switch to live trading by editing .env:
-
-DRY_RUN=false
-ALPACA_PAPER=true   # keep true for paper, set to false for a funded live account
+hold:
+  enabled: true
+  max_overnight_positions: 3
+  max_overnight_notional: 2000
+  min_today_ret: 0.002
+  require_sma_trend: true
+  skip_friday: true
+  stop_atr_mult: 1.2
+  atr_lookback: 14
 
 
 ⸻
 
-GitHub Actions (recommended)
+Trading Logic
 
-This repo includes workflows to run hands-free on a schedule.
-	1.	Add repo secrets in GitHub → Settings → Secrets and variables → Actions:
-
-	•	ALPACA_KEY_ID
-	•	ALPACA_SECRET_KEY
-	•	SLACK_WEBHOOK_URL
-	•	Optional: DRY_RUN (true/false), ALPACA_PAPER (true/false)
-
-	2.	Check cron schedules in .github/workflows/:
-
-	•	morning_open.yml → triggers near 9:30 AM ET to run trade_open.py
-	•	afternoon_close.yml → triggers near 3:55 PM ET to run trade_close.py
-	•	friday_summary.yml → triggers Fridays for weekly_summary.py
-
-If you are not in US/Eastern, adjust crons carefully— Actions use UTC. 9:30 ET is 14:30 UTC (or 13:30 UTC during DST changes—verify each season).
+Morning (trade_open.py)
+	1.	Pull historical prices from Yahoo Finance
+	2.	Compute features:
+	•	1-day & 5-day returns
+	•	Volatility (5-day std dev)
+	•	SMA(5) & SMA(20) relative position
+	3.	Train LightGBM on all but the latest day
+	4.	Predict next-day returns for each ticker
+	5.	Rank by predicted return
+	6.	Place bracket orders for top N:
+	•	Stop-loss at stop_atr_mult × ATR
+	•	Take-profit at take_atr_mult × ATR
+	7.	Log trades and send Slack notification
 
 ⸻
 
-How it works (high level)
-	1.	Data
-	•	Pulls pre-open or latest quotes (Alpaca market data preferred).
-	•	Falls back to secondary sources if configured (e.g., limited use of yfinance).
-	2.	Signals
-	•	Calls strategy/* (e.g., train_lgbm.py) which returns per-symbol intents and sizes.
-	•	Applies guardrails: min price, max allocation, max open positions, etc.
-	3.	Orders
-	•	In live mode, submits market or limit orders via Alpaca’s Trading API.
-	•	Optional bracket (take-profit / stop-loss) using OrderClass.BRACKET.
-	4.	Logging & Notify
-	•	Appends to trade_log.csv and posts Slack messages for visibility.
-	•	Captures errors with stack traces (posted to Slack in redacted form).
-	5.	Close & Recap
-	•	PM script can trim/exit positions if desired.
-	•	Friday script compiles weekly P/L and sends a summary to Slack.
+Close (trade_close.py)
+	1.	Pull open positions
+	2.	Log unrealized P&L into trade_log.csv
+	3.	Hybrid close logic:
+	•	If hold.enabled = true, keep positions meeting criteria:
+	•	Positive momentum (min_today_ret)
+	•	SMA trend up (if enabled)
+	•	Unrealized P&L ≥ 0
+	•	Under position & notional limits
+	•	Skip Friday holds (if enabled)
+	4.	Close all other positions
+	5.	Send Slack summary
 
 ⸻
 
-Configuration notes
-	•	Universe: keep it small at first (e.g., 1–5 tickers) while validating behavior.
-	•	Sizing: MAX_POSITION_DOLLARS and MAX_CONCURRENT_POSITIONS enforce account-appropriate risk.
-	•	Stops/Targets: Defaults are in .env and/or config/settings.yaml and can be overridden per-symbol.
-	•	Intraday exits: If your rules allow, the PM script can close early winners/losers to keep capital nimble.
+Logging
+
+trade_log.csv fields:
+	•	date
+	•	dry_run
+	•	n_orders
+	•	symbols
+	•	details (stop/take)
+	•	pnl
+	•	daily_return
+
+Example:
+
+date,dry_run,n_orders,symbols,details,pnl,daily_return
+2025-08-11,False,3,AAPL,qty=5 stop=170.20 take=180.50,125.50,0.021
+
 
 ⸻
 
-Logs & artifacts
-	•	trade_log.csv: append-only activity log with timestamp, symbol(s), decision, and order detail.
-	•	GitHub Actions artifacts: optional upload of logs after each run (configure in workflows).
-	•	Slack: every decision, order result, and summary is posted for quick review.
+Slack Notifications
+
+Example morning message:
+
+DRY_RUN=False | Top 3 orders for today:
+• AAPL: qty 5 | ref 175.00 | stop 170.20 | take 180.50
+• MSFT: qty 3 | ref 320.10 | stop 315.00 | take 330.00
+• NVDA: qty 2 | ref 450.50 | stop 440.00 | take 470.00
+
+Example close message:
+
+Close script finished: Held 2 positions overnight (AAPL, MSFT), closed 1 (NVDA).
+Today's P&L snapshot: $125.50
+
 
 ⸻
 
-Troubleshooting
-	•	“subscription does not permit querying recent SIP data”
-Your market data plan may be insufficient for that endpoint. Use Alpaca’s free plan endpoints or adjust calls to use last trade/quote supported by your plan.
-	•	404 ... /v2/v2/account
-Double-check you’re using the correct base URL and client (paper vs live). Ensure you don’t duplicate /v2/ in your paths and that your keys match the mode.
-	•	Orders not placed
-Confirm DRY_RUN=false. Check Slack logs for validation failures (sizing cap, market closed, universe empty).
-	•	Wrong session time
-The bot uses US/Eastern by default. Ensure the container/runner timezones are handled and you’re mapping cron to UTC correctly.
+Automation with GitHub Actions
+
+Two workflows run daily:
+	•	.github/workflows/trade_open.yml — triggers at market open
+	•	.github/workflows/trade_close.yml — triggers before market close
+
+These workflows:
+	•	Pull the latest code
+	•	Install dependencies
+	•	Run the scripts with your API keys & config
 
 ⸻
 
-Extending the bot
-	•	Add a new strategy: create strategy/my_strategy.py exposing generate_signals(); wire it in trade_open.py.
-	•	More risk controls: add kill-switches (max daily loss, max slippage), and position cool-downs.
-	•	Data enrichment: plug in fundamentals/alt-data before market open to guide selection.
+Switching Between Paper & Live Trading
+	•	Paper trading (safe, no real money):
+
+export APCA_PAPER="true"
+
+
+	•	Live trading (real money):
+
+export APCA_PAPER="false"
+
+Make sure your API key/secret is for a live Alpaca account.
 
 ⸻
 
-Safety & disclaimers
+Disclaimer
 
-This code is for educational purposes. Trading involves risk; past performance does not guarantee future results. Use DRY_RUN=true until you are fully confident, and prefer paper trading while validating.
+⚠️ This bot is for educational purposes. Live trading involves risk. Use at your own discretion.
 
-⸻
 
-FAQ
-
-Can I run it 24/7?
-Yes via GitHub Actions schedules (recommended) or a small VPS/VM with cron.
-
-How do I switch to paper/live?
-Set ALPACA_PAPER=true for paper, false for live, and use the matching keys.
-
-Where do I change TP/SL?
-Update .env percent defaults or per-symbol overrides in config/settings.yaml.
-
-Can it re-enter after selling?
-Yes—strategy logic controls re-entry. Add cool-down rules to avoid churn.
-
-⸻
-
-License
-
-MIT (or your preferred license)
-
-⸻
-
-Credits
-
-Built by Grant Rodny & helpers. Uses Alpaca APIs and Slack webhooks.
