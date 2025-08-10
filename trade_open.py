@@ -8,8 +8,28 @@ from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 import yfinance as yf
 from strategy import train_lgbm  # reuse your trainer
 from notifier import notify_slack
+import csv
+from pathlib import Path
 
 NY = pytz.timezone("America/New_York")
+
+LOG_FILE = Path("trade_log.csv")
+
+def append_log(date_str, dry_run, orders):
+    header = ["date", "dry_run", "n_orders", "symbols", "details"]
+    row = [
+        date_str,
+        dry_run,
+        len(orders),
+        ",".join([o[0] for o in orders]),
+        "; ".join([f"{o[0]} qty={o[1]} stop={o[3]:.2f} take={o[4]:.2f}" for o in orders])
+    ]
+    file_exists = LOG_FILE.exists()
+    with open(LOG_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(header)
+        writer.writerow(row)
 
 def load_cfg(path="config.yaml"):
     with open(path, "r") as f:
@@ -152,6 +172,9 @@ def main():
     # Build orders (sizes + bracket levels)
     orders = build_orders(cfg, client, prices)
 
+    today_str = datetime.now(NY).strftime("%Y-%m-%d")
+    append_log(today_str, cfg.get("dry_run", True), orders)
+
     # --- Slack pre-trade summary ---
     if orders:
         lines = [f"DRY_RUN={cfg.get('dry_run', True)} | Top {len(orders)} orders for today:"]
@@ -188,6 +211,7 @@ def main():
         parts.append("Failures:")
         parts += [f"• {s} x{q} → {err}" for s, q, err in failed]
     notify_slack("\n".join(parts) if parts else "No orders submitted.")
+    
 
 if __name__ == "__main__":
     main()
