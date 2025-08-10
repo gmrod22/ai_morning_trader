@@ -2,6 +2,7 @@
 import os, pytz
 from datetime import datetime
 from alpaca.trading.client import TradingClient
+from notifier import notify_slack
 
 NY = pytz.timezone("America/New_York")
 
@@ -14,38 +15,35 @@ def get_client():
     return TradingClient(key, sec, paper=paper)
 
 def main():
+    # --- DRY_RUN guard (skip closing in dry mode) ---
     dry_env = os.getenv("DRY_RUN", "")
     dry_run = dry_env.lower() in ("1", "true", "yes", "on")
     if dry_run:
-        print("DRY RUN = True → skipping cancel/close actions.")
+        msg = "DRY RUN = True → skipping cancel/close actions."
+        print(msg)
+        notify_slack(msg)
         return
+
     client = get_client()
-    clock = client.get_clock()
-    if not clock.is_open:
-        print("Market is closed — nothing to do.")
-        return
 
-    # Cancel any open orders first
-    for o in client.get_orders(status="open"):
+    # Cancel any open orders
+    open_orders = client.get_orders(status="open")
+    for o in open_orders:
         try:
-            client.cancel_order_by_id(o.id)
-            print(f"Canceled order {o.id}")
+            client.cancel_order(o.id)
         except Exception as e:
-            print(f"Cancel failed {o.id}: {e}")
+            print(f"Failed to cancel order {o.id}: {e}")
 
-    # Liquidate positions
+    # Close all positions
     positions = client.get_all_positions()
-    if not positions:
-        print("No positions to close.")
-        return
-
     for p in positions:
         try:
-            side = "sell" if float(p.qty) > 0 else "buy"
             client.close_position(p.symbol)
-            print(f"Closed {p.symbol}")
         except Exception as e:
-            print(f"Close failed {p.symbol}: {e}")
+            print(f"Failed to close {p.symbol}: {e}")
+
+    # --- Slack summary after work is done ---
+    notify_slack("Close script finished: canceled open orders and attempted to flatten positions.")
 
 if __name__ == "__main__":
     main()
