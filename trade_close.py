@@ -14,6 +14,11 @@ def get_client():
     return TradingClient(key, sec, paper=paper)
 
 def main():
+    dry_env = os.getenv("DRY_RUN", "")
+    dry_run = dry_env.lower() in ("1", "true", "yes", "on")
+    if dry_run:
+        print("DRY RUN = True → skipping cancel/close actions.")
+        return
     client = get_client()
     clock = client.get_clock()
     if not clock.is_open:
