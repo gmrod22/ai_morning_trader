@@ -128,50 +128,66 @@ def build_orders(cfg, client, prices):
 
 def main():
     cfg = load_cfg()
+
     # --- DRY_RUN override from env (GitHub Secret) ---
     env_dry = os.getenv("DRY_RUN")
     if env_dry is not None:
         cfg["dry_run"] = env_dry.lower() in ("1", "true", "yes", "on")
     print(f"DRY_RUN = {cfg['dry_run']} (source={'env' if env_dry is not None else 'config.yaml'})")
+
     client = get_client()
 
-    # Optional guard: only trade on regular sessions
+    # Guard: only run when regular session is open
     if not market_is_open_now(client):
-        print("Market is closed now — not placing orders.")
+        msg = "Market is closed — skipping open script."
+        print(msg)
+        notify_slack(msg)
         return
 
+    # Use data through yesterday (no peeking into today)
     tickers = cfg["tickers"]
-    # Use data through **yesterday** so we never peek
     today_ny = datetime.now(NY).date()
     prices = fetch_prices(tickers, start="2022-01-01", end=str(today_ny))
 
+    # Build orders (sizes + bracket levels)
     orders = build_orders(cfg, client, prices)
 
-    lines = [f"DRY_RUN={cfg.get('dry_run', True)} | Top {len(orders)} orders for today:"]
-    for sym, qty, px, stp, tk, _ in orders:
-        lines.append(f"• {sym}: qty {qty} | ref {px:.2f} | stop {stp} | take {tk}")
-    notify_slack("\n".join(lines))
-
-    # If actually submitting, notify when done:
-    if not cfg.get("dry_run", True):
-        notify_slack("Submitted orders:\n" + "\n".join([f"• {o[0]} x{o[1]}" for o in orders]) if orders else "No orders submitted")
-
-    print("Planned orders:")
-    for sym, qty, px, stp, tk, _ in orders:
-        print(f"  BUY {sym} x{qty} @ mkt  (stop {stp}, take {tk})  [ref close {px:.2f}]")
-
-    if cfg.get("dry_run", True):
-        print("\nDRY RUN = True → not sending orders. Set dry_run: false in config.yaml to trade.")
+    # --- Slack pre-trade summary ---
+    if orders:
+        lines = [f"DRY_RUN={cfg.get('dry_run', True)} | Top {len(orders)} orders for today:"]
+        for sym, qty, px, stp, tk, _ in orders:
+            lines.append(f"• {sym}: qty {qty} | ref {px:.2f} | stop {stp} | take {tk}")
+        notify_slack("\n".join(lines))
+    else:
+        notify_slack(f"DRY_RUN={cfg.get('dry_run', True)} | No valid orders generated today.")
+        print("No orders to place.")
         return
 
-    # Place orders
+    # Dry run? just log/notify and exit
+    if cfg.get("dry_run", True):
+        print("DRY RUN = True → not submitting orders.")
+        return
+
+    # --- Submit orders ---
+    submitted, failed = [], []
     for sym, qty, px, stp, tk, req in orders:
         try:
             o = client.submit_order(req)
-            print(f"Submitted: {sym} x{qty} (stop {stp}, take {tk}) → id={o.id}")
-            time.sleep(0.4)  # be gentle with rate limits
+            submitted.append((sym, qty, o.id))
+            time.sleep(0.4)  # polite rate limiting
         except Exception as e:
+            failed.append((sym, qty, str(e)))
             print(f"Failed {sym}: {e}")
+
+    # --- Slack post-submit summary ---
+    parts = []
+    if submitted:
+        parts.append("Submitted orders:")
+        parts += [f"• {s} x{q} (id={oid})" for s, q, oid in submitted]
+    if failed:
+        parts.append("Failures:")
+        parts += [f"• {s} x{q} → {err}" for s, q, err in failed]
+    notify_slack("\n".join(parts) if parts else "No orders submitted.")
 
 if __name__ == "__main__":
     main()
