@@ -1,0 +1,3 @@
+#!/Users/grantrodny/ai_morning_trader/venv/bin/python
+from numba.pycc import main
+main()

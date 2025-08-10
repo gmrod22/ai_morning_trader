@@ -1,0 +1,15 @@
+# Universe: reuse the backtest tickers for now
+tickers: ["AAPL","MSFT","NVDA","AMZN","META","GOOG","TSLA","AMD","NFLX","INTC"]
+
+# Picks & sizing
+top_n: 5
+per_trade_budget: 250        # ~$1–2k total exposure
+
+# Risk (simple brackets)
+atr_lookback: 14
+stop_atr_mult: 1.2           # stop = close - 1.2 * ATR
+take_atr_mult: 2.0           # take = close + 2.0 * ATR
+
+# Behavior
+dry_run: true                # true = print orders only; set false to really trade
+time_zone: "America/New_York"  # market reference
