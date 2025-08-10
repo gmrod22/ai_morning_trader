@@ -13,3 +13,13 @@ take_atr_mult: 2.0           # take = close + 2.0 * ATR
 # Behavior
 dry_run: true                # true = print orders only; set false to really trade
 time_zone: "America/New_York"  # market reference
+
+hold:
+  enabled: true
+  max_overnight_positions: 3
+  max_overnight_notional: 2000      # total $ to hold overnight
+  min_today_ret: 0.002              # +0.2% or better today
+  require_sma_trend: true           # price > SMA5 > SMA20
+  skip_friday: true                 # avoid weekend gaps
+  stop_atr_mult: 1.2                # GTC stop ≈ 1.2 * ATR below last close
+  atr_lookback: 14
