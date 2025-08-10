@@ -12,6 +12,7 @@ jobs:
       APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
       APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
       APCA_PAPER: ${{ secrets.APCA_PAPER }}
+      DRY_RUN: ${{ secrets.DRY_RUN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
