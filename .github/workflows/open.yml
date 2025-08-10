@@ -1,0 +1,26 @@
+name: Morning Open Trades
+
+on:
+  schedule:
+    - cron: "31 13 * * 1-5"   # 09:31 ET (13:31 UTC) Mon-Fri
+  workflow_dispatch: {}
+
+jobs:
+  run-open:
+    runs-on: ubuntu-latest
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+      APCA_PAPER: ${{ secrets.APCA_PAPER }}
+      DRY_RUN: ${{ secrets.DRY_RUN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run morning trade script
+        run: python trade_open.py
