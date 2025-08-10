@@ -127,6 +127,11 @@ def build_orders(cfg, client, prices):
 
 def main():
     cfg = load_cfg()
+    # --- DRY_RUN override from env (GitHub Secret) ---
+    env_dry = os.getenv("DRY_RUN")
+    if env_dry is not None:
+        cfg["dry_run"] = env_dry.lower() in ("1", "true", "yes", "on")
+    print(f"DRY_RUN = {cfg['dry_run']} (source={'env' if env_dry is not None else 'config.yaml'})")
     client = get_client()
 
     # Optional guard: only trade on regular sessions
