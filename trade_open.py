@@ -7,6 +7,7 @@ from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopL
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 import yfinance as yf
 from strategy import train_lgbm  # reuse your trainer
+from notifier import notify_slack
 
 NY = pytz.timezone("America/New_York")
 
@@ -145,6 +146,15 @@ def main():
     prices = fetch_prices(tickers, start="2022-01-01", end=str(today_ny))
 
     orders = build_orders(cfg, client, prices)
+
+    lines = [f"DRY_RUN={cfg.get('dry_run', True)} | Top {len(orders)} orders for today:"]
+    for sym, qty, px, stp, tk, _ in orders:
+        lines.append(f"• {sym}: qty {qty} | ref {px:.2f} | stop {stp} | take {tk}")
+    notify_slack("\n".join(lines))
+
+    # If actually submitting, notify when done:
+    if not cfg.get("dry_run", True):
+        notify_slack("Submitted orders:\n" + "\n".join([f"• {o[0]} x{o[1]}" for o in orders]) if orders else "No orders submitted")
 
     print("Planned orders:")
     for sym, qty, px, stp, tk, _ in orders:
