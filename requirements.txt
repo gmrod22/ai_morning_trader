@@ -1,0 +1,7 @@
+pandas
+numpy
+yfinance
+lightgbm
+alpaca-py
+PyYAML
+pytz
