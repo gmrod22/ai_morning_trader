@@ -16,13 +16,16 @@ NY = pytz.timezone("America/New_York")
 LOG_FILE = Path("trade_log.csv")
 
 def append_log(date_str, dry_run, orders):
-    header = ["date", "dry_run", "n_orders", "symbols", "details"]
+    # orders entries are (symbol, qty, ref_close_px, stop, take, request)
+    notional = sum(o[1] * float(o[2]) for o in orders) if orders else 0.0
+    header = ["date", "dry_run", "n_orders", "symbols", "details", "notional"]
     row = [
         date_str,
         dry_run,
         len(orders),
         ",".join([o[0] for o in orders]),
-        "; ".join([f"{o[0]} qty={o[1]} stop={o[3]:.2f} take={o[4]:.2f}" for o in orders])
+        "; ".join([f"{o[0]} qty={o[1]} ref={float(o[2]):.2f} stop={o[3]:.2f} take={o[4]:.2f}" for o in orders]),
+        f"{notional:.2f}",
     ]
     file_exists = LOG_FILE.exists()
     with open(LOG_FILE, "a", newline="") as f:
@@ -206,12 +209,11 @@ def main():
     parts = []
     if submitted:
         parts.append("Submitted orders:")
-        parts += [f"• {s} x{q} (id={oid})" for s, q, oid in submitted]
+        parts += [f"• {s} x{s_qty} (id={oid})" for s, s_qty, oid in submitted]
     if failed:
         parts.append("Failures:")
         parts += [f"• {s} x{q} → {err}" for s, q, err in failed]
     notify_slack("\n".join(parts) if parts else "No orders submitted.")
-    
 
 if __name__ == "__main__":
     main()
