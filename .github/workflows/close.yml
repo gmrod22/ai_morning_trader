@@ -1,0 +1,25 @@
+name: Afternoon Close Positions
+
+on:
+  schedule:
+    - cron: "50 19 * * 1-5"   # 15:50 ET (19:50 UTC) Mon-Fri
+  workflow_dispatch: {}
+
+jobs:
+  run-close:
+    runs-on: ubuntu-latest
+    env:
+      APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+      APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+      APCA_PAPER: ${{ secrets.APCA_PAPER }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run close script
+        run: python trade_close.py
