@@ -3,7 +3,7 @@ name: Morning Open Trades
 on:
   schedule:
     # Start a few minutes before the bell year-round; we wait until 09:31 NY inside the job.
-    - cron: "25 13 * * 1-5"   # 13:25 UTC (works in both EDT/EST with the wait step)
+    - cron: "25 13 * * 1-5"   # 13:25 UTC
   workflow_dispatch: {}
 
 permissions:
@@ -35,16 +35,18 @@ jobs:
           cache: "pip"
 
       - name: Show runner time + config
+        shell: bash
         run: |
           echo "Runner UTC time: $(date -u '+%Y-%m-%d %H:%M:%S %Z')"
           python - <<'PY'
-import os, datetime, zoneinfo
-utc_now = datetime.datetime.now(datetime.timezone.utc)
-ny = zoneinfo.ZoneInfo("America/New_York")
-print("NY time:", utc_now.astimezone(ny).strftime("%Y-%m-%d %H:%M:%S %Z"))
-print("APCA_PAPER =", os.getenv("APCA_PAPER"))
-print("DRY_RUN    =", os.getenv("DRY_RUN"))
-PY
+          import os, datetime
+          from zoneinfo import ZoneInfo
+          utc_now = datetime.datetime.now(datetime.timezone.utc)
+          ny = ZoneInfo("America/New_York")
+          print("NY time:", utc_now.astimezone(ny).strftime("%Y-%m-%d %H:%M:%S %Z"))
+          print("APCA_PAPER =", os.getenv("APCA_PAPER"))
+          print("DRY_RUN    =", os.getenv("DRY_RUN"))
+          PY
 
       - name: Install deps
         run: |
@@ -52,19 +54,20 @@ PY
           pip install -r requirements.txt
 
       - name: Wait until 09:31 America/New_York
+        shell: bash
         run: |
           python - <<'PY'
-import datetime, time, zoneinfo
-ny = zoneinfo.ZoneInfo("America/New_York")
-target_h, target_m = 9, 31
-while True:
-  now = datetime.datetime.now(ny)
-  if (now.hour, now.minute) >= (target_h, target_m):
-    print("Reached:", now.strftime("%Y-%m-%d %H:%M:%S %Z"))
-    break
-  # Sleep in short intervals so cancellation is responsive
-  time.sleep(15)
-PY
+          import datetime, time
+          from zoneinfo import ZoneInfo
+          ny = ZoneInfo("America/New_York")
+          target_h, target_m = 9, 31
+          while True:
+              now = datetime.datetime.now(ny)
+              if (now.hour, now.minute) >= (target_h, target_m):
+                  print("Reached:", now.strftime("%Y-%m-%d %H:%M:%S %Z"))
+                  break
+              time.sleep(15)
+          PY
 
       - name: Run morning trade script
         run: python trade_open.py
