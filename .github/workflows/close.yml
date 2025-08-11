@@ -2,8 +2,8 @@ name: Afternoon Close Positions
 
 on:
   schedule:
-    # Start a little before the close year-round; we wait until 15:55 NY inside the job.
-    - cron: "45 19 * * 1-5"   # 19:45 UTC; works across EDT/EST with the wait step
+    # Start a few minutes before the close year-round; we wait until 15:50 NY inside the job.
+    - cron: "45 19 * * 1-5"   # 19:45 UTC
   workflow_dispatch: {}
 
 permissions:
@@ -16,7 +16,7 @@ concurrency:
 jobs:
   run-close:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     env:
       APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
       APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
@@ -35,35 +35,39 @@ jobs:
           cache: "pip"
 
       - name: Show runner time + config
+        shell: bash
         run: |
           echo "Runner UTC time: $(date -u '+%Y-%m-%d %H:%M:%S %Z')"
           python - <<'PY'
-import os, datetime, zoneinfo
-utc_now = datetime.datetime.now(datetime.timezone.utc)
-ny = zoneinfo.ZoneInfo("America/New_York")
-print("NY time:", utc_now.astimezone(ny).strftime("%Y-%m-%d %H:%M:%S %Z"))
-print("APCA_PAPER =", os.getenv("APCA_PAPER"))
-print("DRY_RUN    =", os.getenv("DRY_RUN"))
-PY
+          import os, datetime
+          from zoneinfo import ZoneInfo
+          utc_now = datetime.datetime.now(datetime.timezone.utc)
+          ny = ZoneInfo("America/New_York")
+          print("NY time:", utc_now.astimezone(ny).strftime("%Y-%m-%d %H:%M:%S %Z"))
+          print("APCA_PAPER =", os.getenv("APCA_PAPER"))
+          print("DRY_RUN    =", os.getenv("DRY_RUN"))
+          PY
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Wait until 15:55 America/New_York
+      - name: Wait until 15:50 America/New_York
+        shell: bash
         run: |
           python - <<'PY'
-import datetime, time, zoneinfo
-ny = zoneinfo.ZoneInfo("America/New_York")
-target_h, target_m = 15, 55   # change to (15, 59) if you prefer 15:59
-while True:
-  now = datetime.datetime.now(ny)
-  if (now.hour, now.minute) >= (target_h, target_m):
-    print("Reached:", now.strftime("%Y-%m-%d %H:%M:%S %Z"))
-    break
-  time.sleep(15)
-PY
+          import datetime, time
+          from zoneinfo import ZoneInfo
+          ny = ZoneInfo("America/New_York")
+          target_h, target_m = 15, 50
+          while True:
+              now = datetime.datetime.now(ny)
+              if (now.hour, now.minute) >= (target_h, target_m):
+                  print("Reached:", now.strftime("%Y-%m-%d %H:%M:%S %Z"))
+                  break
+              time.sleep(15)
+          PY
 
       - name: Run close script
         run: python trade_close.py
