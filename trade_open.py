@@ -58,20 +58,43 @@ def fetch_prices(tickers, start="2022-01-01", end=None):
     return closes.dropna(how="all")
 
 def compute_features_for_training(prices: pd.DataFrame) -> pd.DataFrame:
+    """Build per-ticker features and guarantee a 'date' column.
+    Do NOT drop the last day because y_next is NaN; only drop rows with NaNs in feature columns.
+    """
     rows = []
+    feat_cols = ["ret_1d","ret_5d","vol_5d","sma5_rel","sma20_rel"]
     for t in prices.columns:
         s = prices[t].dropna()
         r = s.pct_change()
         df = pd.DataFrame(index=s.index)
-        df["ret_1d"]   = r.shift(1)
-        df["ret_5d"]   = s.pct_change(5).shift(1)
-        df["vol_5d"]   = r.rolling(5).std().shift(1)
-        df["sma5_rel"] = s.rolling(5).mean().shift(1) / s
-        df["sma20_rel"]= s.rolling(20).mean().shift(1) / s
-        df["y_next"]   = s.pct_change().shift(-1)
-        df["ticker"]   = t
+        df["ret_1d"]    = r.shift(1)
+        df["ret_5d"]    = s.pct_change(5).shift(1)
+        df["vol_5d"]    = r.rolling(5).std().shift(1)
+        df["sma5_rel"]  = s.rolling(5).mean().shift(1) / s
+        df["sma20_rel"] = s.rolling(20).mean().shift(1) / s
+        df["y_next"]    = s.pct_change().shift(-1)   # label only for training rows
+        df["ticker"]    = t
         rows.append(df)
-    data = pd.concat(rows).dropna().reset_index().rename(columns={"index":"date"})
+
+    if not rows:
+        return pd.DataFrame(columns=["date", *feat_cols, "y_next", "ticker"])
+
+    data = pd.concat(rows)
+
+    # Ensure datetime index named 'date' BEFORE reset_index()
+    data.index = pd.to_datetime(data.index)
+    data.index.name = "date"
+
+    # Drop NaNs only in feature columns
+    data = data.dropna(subset=feat_cols).reset_index()
+
+    # Safety: ensure 'date' column exists (handles odd index names)
+    if "date" not in data.columns:
+        for c in data.columns:
+            if np.issubdtype(data[c].dtype, np.datetime64):
+                data = data.rename(columns={c: "date"})
+                break
+
     return data
 
 def compute_atr(prices: pd.DataFrame, lookback=14):
@@ -82,17 +105,33 @@ def compute_atr(prices: pd.DataFrame, lookback=14):
 
 def rank_today(cfg, prices):
     data = compute_features_for_training(prices)
-    # train using all but the last day; predict on the last day’s row for each ticker
+
+    if data.empty:
+        return pd.DataFrame(columns=["ticker","date","pred"])
+
+    # Make sure 'date' is datetime
+    if "date" not in data.columns:
+        # last-ditch safety: try to find any datetime-like col
+        for c in data.columns:
+            if np.issubdtype(data[c].dtype, np.datetime64):
+                data = data.rename(columns={c: "date"})
+                break
+
+    data["date"] = pd.to_datetime(data["date"])
     last_day = data["date"].max()
+
     X_full = pd.get_dummies(
         data[["ret_1d","ret_5d","vol_5d","sma5_rel","sma20_rel","ticker"]],
         columns=["ticker"], drop_first=True
     ).astype(float)
     y_full = data["y_next"].astype(float).values
-    dates  = pd.to_datetime(data["date"])
+    dates  = data["date"].values
 
     train_mask = dates < last_day
     test_mask  = dates == last_day
+
+    if train_mask.sum() < 100 or test_mask.sum() == 0:
+        return pd.DataFrame(columns=["ticker","date","pred"])
 
     X_train, y_train = X_full[train_mask], y_full[train_mask]
     X_test  = X_full[test_mask]
@@ -103,7 +142,7 @@ def rank_today(cfg, prices):
     test_rows = data.loc[test_mask, ["ticker","date"]].copy()
     test_rows["pred"] = preds
     test_rows = test_rows.sort_values("pred", ascending=False).reset_index(drop=True)
-    return test_rows  # top rows = top picks
+    return test_rows
 
 def build_orders(cfg, client, prices):
     tickers = cfg["tickers"]
