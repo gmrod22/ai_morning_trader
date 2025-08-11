@@ -5,3 +5,4 @@ lightgbm
 alpaca-py
 PyYAML
 pytz
+scikit-learn
