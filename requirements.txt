@@ -6,3 +6,5 @@ alpaca-py
 PyYAML
 pytz
 scikit-learn
+requests
+matplotlib
