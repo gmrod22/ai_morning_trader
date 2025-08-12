@@ -1,52 +1,28 @@
 # trade_close.py
-import os, pytz, yaml, csv
-from datetime import datetime
+import os
+import math
+import time
+import pytz
+import yaml
+import csv
 from pathlib import Path
+from datetime import datetime, timedelta
 
+import numpy as np
+import pandas as pd
 import yfinance as yf
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import StopOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import GetOrdersRequest
+from alpaca.trading.enums import OrderStatus
 
 from notifier import notify_slack
 
 NY = pytz.timezone("America/New_York")
-
-# -------- Logging helpers --------
 LOG_FILE = Path("trade_log.csv")
 
-def append_pnl_and_return(date_str, total_pnl):
-    """Update today's P&L ($) and daily_return (= pnl / notional) in trade_log.csv."""
-    if not LOG_FILE.exists():
-        return
-    with open(LOG_FILE, "r", newline="") as f:
-        rows = list(csv.reader(f))
-    if not rows:
-        return
-    header = rows[0]
-    if "pnl" not in header:
-        header += ["pnl", "daily_return"]
-        rows[0] = header
-    for i in range(1, len(rows)):
-        r = rows[i]
-        if r and r[0] == date_str:
-            try:
-                idx_notional = header.index("notional")
-                notional = float(r[idx_notional]) if r[idx_notional] else 0.0
-            except Exception:
-                notional = 0.0
-            daily_ret = (total_pnl / notional) if notional > 0 else 0.0
-            while len(r) < len(header):
-                r.append("")
-            r[header.index("pnl")] = f"{total_pnl:.2f}"
-            r[header.index("daily_return")] = f"{daily_ret:.6f}"
-            rows[i] = r
-            break
-    with open(LOG_FILE, "w", newline="") as f:
-        csv.writer(f).writerows(rows)
 
-# -------- Config / client helpers --------
+# -------------------- Config & Clients --------------------
 def load_cfg(path="config.yaml"):
     with open(path, "r") as f:
         return yaml.safe_load(f)
@@ -59,24 +35,221 @@ def get_client():
         raise RuntimeError("Set APCA_API_KEY_ID and APCA_API_SECRET_KEY in your environment.")
     return TradingClient(key, sec, paper=paper)
 
-# -------- Data helper --------
-def _fetch_daily_prices(tickers, end_date, lookback=60):
-    """Fetch daily adjusted closes for the universe up to end_date; return last `lookback` rows."""
-    if not tickers:
-        return yf.download("SPY", period="3mo", auto_adjust=True, progress=False)[["Close"]].tail(1)  # dummy
-    df = yf.download(tickers, period="max", end=str(end_date), auto_adjust=True, progress=False)
-    closes = df["Close"]
-    if isinstance(closes, yf.pandas.Series):  # rare single-ticker shape
-        closes = closes.to_frame()
-    return closes.dropna(how="all").tail(lookback)
 
-# -------- Main hybrid close --------
+# -------------------- Logging helpers --------------------
+def append_pnl_and_return(date_str, total_pnl, notional_guess=0.0):
+    """
+    Update today's P&L ($) and daily_return (= pnl / notional) in trade_log.csv, if file/date exists.
+    """
+    if not LOG_FILE.exists():
+        return
+    with open(LOG_FILE, "r", newline="") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        return
+    header = rows[0]
+    # ensure columns exist
+    if "pnl" not in header:
+        header += ["pnl", "daily_return"]
+        rows[0] = header
+    # find today and write values
+    for i in range(1, len(rows)):
+        r = rows[i]
+        if r and r[0] == date_str:
+            # prefer log notional if present
+            try:
+                idx_notional = header.index("notional")
+                notional = float(r[idx_notional]) if r[idx_notional] else notional_guess
+            except Exception:
+                notional = notional_guess
+            daily_ret = (total_pnl / notional) if notional > 0 else 0.0
+            while len(r) < len(header):
+                r.append("")
+            r[header.index("pnl")] = f"{total_pnl:.2f}"
+            r[header.index("daily_return")] = f"{daily_ret:.6f}"
+            rows[i] = r
+            break
+    with open(LOG_FILE, "w", newline="") as f:
+        csv.writer(f).writerows(rows)
+
+
+# -------------------- Data helpers --------------------
+def _fetch_daily_prices(tickers, end_date, lookback=60):
+    """
+    Pulls daily OHLC from yfinance. Returns (close_df, open_df)
+    """
+    start = (pd.to_datetime(end_date) - pd.Timedelta(days=int(lookback*2.2))).date().isoformat()
+    df = yf.download(tickers, start=start, end=str(end_date), auto_adjust=False, progress=False)
+    # yfinance returns MultiIndex cols for multiple tickers, normal df for single
+    if isinstance(df.columns, pd.MultiIndex):
+        close = df["Close"].copy()
+        openp = df["Open"].copy()
+    else:
+        # single ticker -> promote to 2D
+        close = df[["Close"]].copy()
+        openp = df[["Open"]].copy()
+        # name the single column with the ticker
+        colname = tickers[0] if isinstance(tickers, (list, tuple)) and tickers else "TICKER"
+        close.columns = [colname]
+        openp.columns = [colname]
+    # ensure sorted and clean
+    close = close.sort_index().dropna(how="all")
+    openp = openp.sort_index().dropna(how="all")
+    return close, openp
+
+def _atr_proxy(prices: pd.DataFrame, lookback=14) -> pd.Series:
+    """
+    Close-to-close ATR proxy in $ for a single symbol series.
+    """
+    r = prices.pct_change().abs()
+    dollar = (r * prices).rolling(lookback).mean()
+    return dollar.iloc[-1]  # last row (per symbol)
+
+
+# -------------------- Hybrid hold filter --------------------
+def _hybrid_hold_ok(cfg_hold, prices_close: pd.DataFrame, day, sym, entry_px_today):
+    """
+    Decide whether to hold 'sym' overnight using momentum/trend filters.
+    Returns (ok: bool)
+    """
+    enabled = bool(cfg_hold.get("enabled", False))
+    if not enabled:
+        return False
+    skip_friday = bool(cfg_hold.get("skip_friday", True))
+    if skip_friday and pd.Timestamp(day).tz_localize(NY).weekday() == 4:
+        return False
+
+    # require price history
+    if day not in prices_close.index:
+        return False
+    idx = prices_close.index.get_loc(day)
+    if idx < 1:
+        return False
+
+    last_c = float(prices_close.iloc[idx].get(sym, np.nan))
+    prev_c = float(prices_close.iloc[idx-1].get(sym, np.nan))
+    if not (np.isfinite(last_c) and np.isfinite(prev_c)) or last_c <= 0 or prev_c <= 0:
+        return False
+
+    min_today_ret = float(cfg_hold.get("min_today_ret", 0.0))
+    today_ret = last_c / prev_c - 1.0
+    if today_ret < min_today_ret:
+        return False
+
+    if bool(cfg_hold.get("require_sma_trend", True)):
+        s5 = prices_close[sym].rolling(5).mean().iloc[idx]
+        s20 = prices_close[sym].rolling(20).mean().iloc[idx]
+        if not np.isfinite(s5) or not np.isfinite(s20) or not (last_c > s5 > s20):
+            return False
+
+    # Favor winners on the day vs entry price (approx)
+    if entry_px_today is not None and (last_c - entry_px_today) < 0:
+        return False
+
+    return True
+
+
+# -------------------- Main Close Flow --------------------
 def main():
-    # --- DRY_RUN guard (skip closing in dry mode) ---
+    # DRY_RUN guard
     dry_env = os.getenv("DRY_RUN", "")
     dry_run = dry_env.lower() in ("1", "true", "yes", "on")
+
+    cfg = load_cfg()
+    hold_cfg = cfg.get("hold", {})
+
+    client = get_client()
+    ny_now = datetime.now(NY)
+    today_str = ny_now.strftime("%Y-%m-%d")
+
+    # --- Pull current positions & PnL snapshot
+    try:
+        positions = client.get_all_positions()
+        total_unreal = sum(float(p.unrealized_pl) for p in positions)
+        # best-effort notionals for logging
+        notional_guess = sum(float(p.market_value) for p in positions if hasattr(p, "market_value"))
+        append_pnl_and_return(today_str, total_unreal, notional_guess=notional_guess)
+        try:
+            notify_slack(f"[Close] Pre-close snapshot: positions={len(positions)} | Unrealized P&L ${total_unreal:.2f}")
+        except Exception:
+            pass
+    except Exception as e:
+        print("P&L snapshot error:", e)
+        positions = []
+
+    # If no positions, we can still cancel any stray open orders and exit
+    symbols = sorted({p.symbol for p in positions})
+
+    # --- Cancel any OPEN orders, but only for symbols we'll FLATTEN (decide below).
+    # For now, just fetch open orders; we'll filter after we compute hold list.
+    try:
+        open_orders = []
+        try:
+            req = GetOrdersRequest(status=OrderStatus.OPEN)
+            open_orders = list(client.get_orders(filter=req))
+        except Exception as e:
+            print("Fetching open orders failed:", e)
+    except Exception as e:
+        print("Open orders retrieval error:", e)
+        open_orders = []
+
+    # --- Build price history for hybrid decision (only if we have positions)
+    close_df, open_df = (pd.DataFrame(), pd.DataFrame())
+    if symbols:
+        lookback = int(hold_cfg.get("atr_lookback", cfg.get("atr_lookback", 14))) + 40
+        try:
+            close_df, open_df = _fetch_daily_prices(symbols, end_date=ny_now.date(), lookback=lookback)
+        except Exception as e:
+            print("Price fetch error:", e)
+
+    # --- Decide hold vs flatten for each position
+    hold_list = []     # [(symbol, qty)]
+    flatten_list = []  # [symbol]
+    held_notional_cap = float(hold_cfg.get("max_overnight_notional", 0.0))
+    held_pos_cap = int(hold_cfg.get("max_overnight_positions", 0))
+
+    held_notional_sum = 0.0
+
+    if symbols and not close_df.empty:
+        last_day = close_df.index[-1]
+        for p in positions:
+            sym = p.symbol
+            qty = int(float(p.qty))
+            # Use today's entry ref if available (approx: today's open)
+            entry_px_today = None
+            try:
+                entry_px_today = float(open_df.iloc[-1].get(sym, np.nan))
+            except Exception:
+                entry_px_today = None
+
+            ok = _hybrid_hold_ok(hold_cfg, close_df, last_day, sym, entry_px_today)
+            # enforce caps
+            last_close = float(close_df.iloc[-1].get(sym, np.nan)) if sym in close_df.columns else None
+            notional = qty * last_close if (last_close and np.isfinite(last_close)) else 0.0
+
+            if ok and (held_pos_cap <= 0 or len(hold_list) < held_pos_cap) and \
+               (held_notional_cap <= 0 or (held_notional_sum + notional) <= held_notional_cap):
+                hold_list.append((sym, qty))
+                held_notional_sum += notional
+            else:
+                flatten_list.append(sym)
+    else:
+        # no price data or no positions -> just flatten everything
+        flatten_list = symbols[:]
+
+    # --- Cancel open orders only for symbols we plan to FLATTEN
+    if open_orders:
+        for o in open_orders:
+            try:
+                if flatten_list and getattr(o, "symbol", None) in flatten_list:
+                    client.cancel_order_by_id(o.id)
+                    print(f"Canceled order {o.id} ({o.symbol})")
+            except Exception as ce:
+                print(f"Cancel failed {getattr(o, 'id', '?')}: {ce}")
+
+    # --- DRY_RUN handling: log decision & exit
     if dry_run:
-        msg = "DRY RUN = True → skipping cancel/close actions."
+        msg = f"[Close] DRY_RUN=True → will flatten: {flatten_list or 'none'}; hold: {[s for s,_ in hold_list] or 'none'}"
         print(msg)
         try:
             notify_slack(msg)
@@ -84,152 +257,31 @@ def main():
             pass
         return
 
-    cfg = load_cfg()
-    hold_cfg = cfg.get("hold", {})
-    hold_enabled = bool(hold_cfg.get("enabled", False))
-
-    client = get_client()
-    ny_now = datetime.now(NY)
-    today_str = ny_now.strftime("%Y-%m-%d")
-
-    # Get current positions
-    try:
-        positions = client.get_all_positions()
-    except Exception as e:
-        print("Fetching positions failed:", e)
-        positions = []
-
-    # Pre-close P&L snapshot (log + Slack)
-    try:
-        total_pnl = sum(float(p.unrealized_pl) for p in positions)
-        append_pnl_and_return(today_str, total_pnl)
-        try:
-            notify_slack(f"Today's P&L snapshot (pre-close): ${total_pnl:.2f}")
-        except Exception:
-            pass
-    except Exception as e:
-        print("P&L logging error:", e)
-
-    # Cancel any open orders first
-    try:
-        for o in client.get_orders(status="open"):
-            try:
-                client.cancel_order_by_id(o.id)
-                print(f"Canceled order {o.id}")
-            except Exception as ce:
-                print(f"Cancel failed {o.id}: {ce}")
-    except Exception as e:
-        print("Fetching open orders failed:", e)
-
-    if not positions:
-        print("No positions to manage.")
-        try:
-            notify_slack("Close script finished: no positions.")
-        except Exception:
-            pass
-        return
-
-    # If hybrid hold is disabled OR it's Friday and we skip Friday holds → flatten everything
-    if (not hold_enabled) or (ny_now.weekday() == 4 and hold_cfg.get("skip_friday", True)):
-        try:
-            for p in positions:
-                client.close_position(p.symbol)
-                print(f"Closed {p.symbol}")
-            notify_slack("Close script finished: flattened all positions.")
-        except Exception as e:
-            print("Flatten error:", e)
-        return
-
-    # ---------- Hybrid logic: decide hold vs close ----------
-    symbols = [p.symbol for p in positions]
-    lookback = max(60, int(hold_cfg.get("atr_lookback", 14)) + 30)
-    prices = _fetch_daily_prices(symbols, end_date=ny_now.date(), lookback=lookback)
-
-    # Indicators
-    atr_look = int(hold_cfg.get("atr_lookback", 14))
-    # ATR proxy (close-to-close in $)
-    atr = (prices.pct_change().abs() * prices).rolling(atr_look).mean().iloc[-1].fillna(0.0)
-    sma5 = prices.rolling(5).mean().iloc[-1]
-    sma20 = prices.rolling(20).mean().iloc[-1]
-    last_close = prices.iloc[-1]
-    prev_close = prices.iloc[-2] if len(prices) >= 2 else last_close
-    today_ret = (last_close / prev_close - 1.0).fillna(0.0)
-
-    # Thresholds / caps
-    max_hold_positions = int(hold_cfg.get("max_overnight_positions", 0))
-    max_hold_notional = float(hold_cfg.get("max_overnight_notional", 0.0))
-    min_today_ret = float(hold_cfg.get("min_today_ret", 0.0))
-    require_trend = bool(hold_cfg.get("require_sma_trend", True))
-    stop_k = float(hold_cfg.get("stop_atr_mult", 1.2))
-
-    to_hold, to_close = [], []
-    held_notional = 0.0
-
-    for p in positions:
-        sym = p.symbol
-        try:
-            qty = abs(int(float(p.qty)))
-        except Exception:
-            qty = 0
-        cur_px = float(last_close.get(sym, 0.0))
-        if qty == 0 or cur_px <= 0:
-            to_close.append(sym)
-            continue
-
-        mom_ok = float(today_ret.get(sym, 0.0)) >= min_today_ret
-        if require_trend:
-            s5 = float(sma5.get(sym, cur_px))
-            s20 = float(sma20.get(sym, cur_px))
-            trend_ok = (cur_px > s5 > s20)
-        else:
-            trend_ok = True
-        pnl_ok = float(p.unrealized_pl) >= 0.0  # prefer winners
-
-        candidate_notional = qty * cur_px
-
-        if mom_ok and trend_ok and pnl_ok \
-           and len(to_hold) < max_hold_positions \
-           and (held_notional + candidate_notional) <= max_hold_notional:
-            to_hold.append((sym, qty, cur_px))
-            held_notional += candidate_notional
-        else:
-            to_close.append(sym)
-
-    # Execute closes
-    for sym in to_close:
+    # --- Execute flatten operations
+    closed_ok, close_err = [], []
+    for sym in flatten_list:
         try:
             client.close_position(sym)
-            print(f"Closed {sym}")
+            closed_ok.append(sym)
+            # be polite to API
+            time.sleep(0.3)
         except Exception as ce:
-            print(f"Close failed {sym}: {ce}")
+            close_err.append((sym, str(ce)))
 
-    # For holds: place a GTC protective stop
-    for sym, qty, cur_px in to_hold:
-        a = float(atr.get(sym, 0.0))
-        stop_price = round(max(0.01, cur_px - stop_k * a), 2)
-        try:
-            stop_req = StopOrderRequest(
-                symbol=sym,
-                qty=qty,
-                side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC,
-                stop_price=stop_price
-            )
-            client.submit_order(stop_req)
-            print(f"Holding {sym} overnight with GTC stop @ {stop_price}")
-        except Exception as e:
-            print(f"GTC stop placement failed for {sym}: {e}")
-
-    # Slack summary
+    # --- Summary & Slack
+    parts = [f"[Close] Done. Closed {len(closed_ok)} positions."]
+    if hold_list:
+        parts.append(f"Holding overnight: {', '.join([s for s,_ in hold_list])}")
+    if close_err:
+        parts.append("Close errors:")
+        parts += [f"• {s} → {err}" for s, err in close_err]
+    msg = "\n".join(parts)
+    print(msg)
     try:
-        msg = (
-            "Hybrid close:\n"
-            + (f"• Held ({len(to_hold)}): " + ", ".join([h[0] for h in to_hold]) + "\n" if to_hold else "• Held: none\n")
-            + (f"• Closed ({len(to_close)}): " + ", ".join(to_close) if to_close else "• Closed: none")
-        )
         notify_slack(msg)
     except Exception:
         pass
+
 
 if __name__ == "__main__":
     main()
