@@ -27,5 +27,5 @@ hold:
   atr_lookback: 14      # take = close + 2.0 * ATR
 
 # Behavior
-dry_run: true                # true = print orders only; set false to really trade
+dry_run: false                # true = print orders only; set false to really trade
 time_zone: "America/New_York"  # market reference
