@@ -136,7 +136,7 @@ def main():
 
     def _bar_close(b):
     # be tolerant across alpaca-py versions
-    return getattr(b, "close", getattr(b, "c", None))
+        return getattr(b, "close", getattr(b, "c", None))
 
     series = [ _bar_close(b) for b in bars.data[SYMBOL] ]
     series = [ float(x) for x in series if x is not None ]
