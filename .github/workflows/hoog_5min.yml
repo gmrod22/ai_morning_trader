@@ -25,9 +25,10 @@ jobs:
 
       - name: Gate to US market hours via Alpaca clock
         env:
-          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
-          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-          PAPER: "true"
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          APCA_PAPER: ${{ secrets.APCA_PAPER }}     # "true" for paper, "false" for live
+          DRY_RUN: ${{ secrets.DRY_RUN }} 
         run: |
           python - << 'PY'
           import os
