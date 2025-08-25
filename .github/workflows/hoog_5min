@@ -1,0 +1,58 @@
+name: HOOG 5-min Poller
+
+on:
+  schedule:
+    - cron: "*/5 * * * 1-5"   # every 5 minutes, Mon–Fri (UTC)
+  workflow_dispatch: {}        # allow manual runs
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8         # each poll is quick; keep this tight
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install alpaca-py numpy pytz
+
+      - name: Gate to US market hours via Alpaca clock
+        env:
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          PAPER: "true"
+        run: |
+          python - << 'PY'
+          import os
+          from alpaca.trading.client import TradingClient
+          c = TradingClient(os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"], paper=os.environ["PAPER"].lower()=="true")
+          clk = c.get_clock()
+          print(f"is_open={clk.is_open}")
+          # Write a file flag if open so next step can continue
+          open("MARKET_OPEN.flag","w").write("1" if clk.is_open else "0")
+          PY
+
+      - name: Skip if market closed
+        run: |
+          [ "$(cat MARKET_OPEN.flag)" = "1" ] || { echo "Market closed; skipping."; exit 0; }
+
+      - name: Run 5-minute poller
+        env:
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          PAPER: ${{ vars.PAPER || 'true' }}      # optional: define at repo/org level
+          DRY_RUN: ${{ vars.DRY_RUN || 'true' }}  # set to 'false' when ready
+          SYMBOL: "HOOG"
+          DATA_FEED: "iex"
+          ROLLING_MINUTES: "40"
+          DOLLARS_PER_UNIT: "150"
+          MAX_POSITION_SHARES: "120"
+        run: |
+          python hoog_poller.py
