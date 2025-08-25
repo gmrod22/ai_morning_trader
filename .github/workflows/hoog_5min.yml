@@ -3,12 +3,12 @@ name: HOOG 5-min Poller
 on:
   schedule:
     - cron: "*/5 * * * 1-5"   # every 5 minutes, Mon–Fri (UTC)
-  workflow_dispatch: {}        # allow manual runs
+  workflow_dispatch: {}
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 8         # each poll is quick; keep this tight
+    timeout-minutes: 8
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -23,20 +23,32 @@ jobs:
           python -m pip install --upgrade pip
           pip install alpaca-py numpy pytz
 
+      - name: Validate Alpaca secrets are present
+        run: |
+          if [ -z "${{ secrets.APCA_API_KEY_ID }}" ] || [ -z "${{ secrets.APCA_API_SECRET_KEY }}" ]; then
+            echo "::error::Missing APCA_API_KEY_ID and/or APCA_API_SECRET_KEY repository secrets."
+            echo "Set them in Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "Alpaca APCA_* secrets detected."
+
       - name: Gate to US market hours via Alpaca clock
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
-          APCA_PAPER: ${{ secrets.APCA_PAPER }}     # "true" for paper, "false" for live
-          DRY_RUN: ${{ secrets.DRY_RUN }} 
+          APCA_PAPER: ${{ secrets.APCA_PAPER || 'true' }}
         run: |
           python - << 'PY'
           import os
           from alpaca.trading.client import TradingClient
-          c = TradingClient(os.environ["ALPACA_KEY_ID"], os.environ["ALPACA_SECRET_KEY"], paper=os.environ["PAPER"].lower()=="true")
+          key = os.environ.get("APCA_API_KEY_ID")
+          sec = os.environ.get("APCA_API_SECRET_KEY")
+          paper = os.environ.get("APCA_PAPER","true").lower()=="true"
+          if not key or not sec:
+              raise SystemExit("APCA credentials not found in env.")
+          c = TradingClient(key, sec, paper=paper)
           clk = c.get_clock()
           print(f"is_open={clk.is_open}")
-          # Write a file flag if open so next step can continue
           open("MARKET_OPEN.flag","w").write("1" if clk.is_open else "0")
           PY
 
@@ -46,10 +58,10 @@ jobs:
 
       - name: Run 5-minute poller
         env:
-          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
-          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-          PAPER: ${{ vars.PAPER || 'true' }}      # optional: define at repo/org level
-          DRY_RUN: ${{ vars.DRY_RUN || 'true' }}  # set to 'false' when ready
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          APCA_PAPER: ${{ secrets.APCA_PAPER || 'true' }}  # "true" for paper, "false" for live
+          DRY_RUN: ${{ secrets.DRY_RUN || 'true' }}        # set to 'false' when ready
           SYMBOL: "HOOG"
           DATA_FEED: "iex"
           ROLLING_MINUTES: "40"
